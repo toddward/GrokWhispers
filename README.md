@@ -75,6 +75,10 @@ You can change the hotkey in Settings. Any combination works, such as Right ⌥ 
 ### macOS
 On first run, grant **Microphone** and **Accessibility** permissions. Accessibility is needed to detect the hotkey and to paste. Restart GrokWhispers after granting Accessibility. The app lives in the menu bar and has no Dock icon.
 
+**macOS virtual machines** (UTM, VirtualBuddy, Tart and other Apple Virtualization guests): the guest's "Apple Virtual Sound Device" can silence the microphone for a while after any sound plays, which makes the next dictation come back empty. GrokWhispers detects these VMs and turns its sound cues off by default. If dictations still come back as "No speech detected", check that the VM app has microphone access on the host Mac.
+
+To check the mic pipeline, run `GrokWhispers.app/Contents/MacOS/GrokWhispers --mic-test`. It runs three back-to-back captures and writes the results to `~/Library/Logs/GrokWhispers/grokwhispers.log`. Add `--mic-test=full` to also run the overlay and cue steps.
+
 ### Linux (X11)
 The global hold-to-talk hotkey works out of the box. Install `xdotool` for the most reliable pasting:
 ```bash

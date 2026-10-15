@@ -15,6 +15,7 @@ async function load() {
   $('hotkey').textContent = state.hotkeyLabel;
   $('dictionary').value = (s.dictionary || []).join('\n');
   $('polish').disabled = s.engine === 'grok-stt';
+  $('vmSoundsHint').classList.toggle('hidden', !state.virtualMachine);
   document.querySelectorAll('.linux-only').forEach((el) => el.classList.toggle('hidden', state.platform !== 'linux'));
   renderKeyStatus();
   renderPerms();

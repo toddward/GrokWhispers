@@ -59,6 +59,7 @@ api.on('overlay:notice', ({ message, kind }) => {
 
 // Short synthesized cues, so no audio assets need to ship.
 let audioCtx = null;
+let closeTimer = null;
 const CUES = {
   start: [[587, 0], [880, 0.07]],
   stop: [[880, 0], [587, 0.07]],
@@ -69,6 +70,7 @@ const CUES = {
 api.on('overlay:sound', (name) => {
   const cue = CUES[name];
   if (!cue) return;
+  clearTimeout(closeTimer);
   audioCtx = audioCtx || new AudioContext();
   const t0 = audioCtx.currentTime + 0.01;
   for (const [freq, offset] of cue) {
@@ -83,4 +85,11 @@ api.on('overlay:sound', (name) => {
     osc.start(t0 + offset);
     osc.stop(t0 + offset + 0.14);
   }
+  // Release the audio output once the cue has played; some virtual sound
+  // devices disturb microphone input while an output stream is active.
+  closeTimer = setTimeout(() => {
+    const ctx = audioCtx;
+    audioCtx = null;
+    ctx?.close().catch(() => {});
+  }, 600);
 });

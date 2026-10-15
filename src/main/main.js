@@ -16,9 +16,22 @@ const logger = require('./log');
 const { log } = logger;
 
 const IS_MAC = process.platform === 'darwin';
+
+// Apple Virtualization guests report hw.model "VirtualMac…". Their virtual
+// sound device can drop the microphone to silence after sound cues play.
+function detectMacVm() {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const model = require('node:child_process').execFileSync('sysctl', ['-n', 'hw.model'], { timeout: 1000 }).toString().trim();
+    return /^VirtualMac/i.test(model);
+  } catch {
+    return false;
+  }
+}
+const IS_MAC_VM = detectMacVm();
 const WAYLAND = process.platform === 'linux' && isWayland();
 const SMOKE = process.argv.includes('--smoke-test');
-const MIC_TEST = process.argv.includes('--mic-test');
+const MIC_TEST = process.argv.some((a) => a.startsWith('--mic-test'));
 const ROOT = path.join(__dirname, '..', '..');
 const asset = (...p) => path.join(ROOT, 'assets', ...p);
 const renderer = (...p) => path.join(ROOT, 'src', 'renderer', ...p);
@@ -261,6 +274,7 @@ handleSettings('settings:get', () => ({
   apiKeySource: config.apiKeySource(),
   hotkeyLabel: hotkeyLabel(),
   platform: process.platform,
+  virtualMachine: IS_MAC_VM,
 }));
 
 handleSettings('settings:update', (_e, patch) => {
@@ -605,6 +619,10 @@ app.whenReady().then(async () => {
   const dir = app.getPath('userData');
   logger.init(app.getPath('logs'));
   config = new Config(dir, { safeStorage });
+  if (IS_MAC_VM && !config.settings.vmSoundsDefaulted) {
+    config.update({ sounds: false, vmSoundsDefaulted: true });
+    log('app', 'virtual machine detected; sound cues turned off by default');
+  }
   log('app', 'start', {
     version: app.getVersion(),
     electron: process.versions.electron,
@@ -613,6 +631,8 @@ app.whenReady().then(async () => {
     wayland: WAYLAND,
     uiohookLoaded: Boolean(uiohook),
     accessibility: IS_MAC ? systemPreferences.isTrustedAccessibilityClient(false) : null,
+    macVm: IS_MAC_VM,
+    sounds: config.settings.sounds,
     settings: (({ engine, insertMethod, pasteShortcut, hotkey, handsFreeOnTap, polish }) => ({ engine, insertMethod, pasteShortcut, hotkey, handsFreeOnTap, polish }))(config.settings),
   });
   history = new History(dir, { limit: config.settings.historyLimit });
@@ -658,31 +678,97 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
 });
 
-// Opens and closes the mic several times in a row, like consecutive dictations,
-// and reports levels. Exact zeros mean the capture delivered digital silence.
+// Opens and closes the mic repeatedly, like consecutive dictations, and reports
+// levels. `--mic-test=full` interleaves the other things a real dictation does
+// (overlay + sound cues, typing via System Events) to find what silences the mic.
 async function runMicTest() {
+  const full = process.argv.includes('--mic-test=full') || process.argv.includes('full');
   if (IS_MAC && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
     await systemPreferences.askForMediaAccess('microphone');
   }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const results = [];
+  const capture = async (label, ms, { during, before } = {}) => {
+    const levels = [];
+    micTestSink = (l) => levels.push(l);
+    await recorder.start(config.settings.micDeviceId);
+    if (during) during();
+    await sleep(ms);
+    if (before) before();
+    await recorder.stop();
+    micTestSink = null;
+    const sum = levels.reduce((a, b) => a + b, 0);
+    const r = {
+      step: label,
+      chunks: levels.length,
+      peak: Math.round(Math.max(0, ...levels) * 10000) / 10000,
+      mean: Math.round((levels.length ? sum / levels.length : 0) * 10000) / 10000,
+      zeroChunks: levels.filter((l) => l === 0).length,
+    };
+    results.push(r);
+    log('mic-test', 'capture', r);
+    await sleep(800);
+    return r;
+  };
   try {
     await recorderReady;
-    for (let i = 1; i <= 3; i += 1) {
-      const levels = [];
+    await new Promise((r) => (overlayWin.webContents.isLoading() ? overlayWin.webContents.once('did-finish-load', r) : r()));
+    const continuous = process.argv.includes('--mic-test=continuous');
+    if (continuous) {
+      // Phase A: one long-lived capture, measured in 2 s windows.
+      let levels = [];
       micTestSink = (l) => levels.push(l);
       await recorder.start(config.settings.micDeviceId);
-      await new Promise((r) => setTimeout(r, 1500));
+      for (let w = 1; w <= 10; w += 1) {
+        await sleep(2000);
+        const win = levels; levels = [];
+        const mean = win.length ? win.reduce((a, b) => a + b, 0) / win.length : 0;
+        const r = { step: `continuous-${w * 2}s`, chunks: win.length, peak: Math.round(Math.max(0, ...win) * 10000) / 10000, mean: Math.round(mean * 10000) / 10000, zeroChunks: win.filter((l) => l === 0).length };
+        results.push(r);
+        log('mic-test', 'capture', r);
+      }
       await recorder.stop();
       micTestSink = null;
-      const peak = Math.max(0, ...levels);
-      results.push({ capture: i, chunks: levels.length, peak: Math.round(peak * 10000) / 10000, zeroChunks: levels.filter((l) => l === 0).length });
-      await new Promise((r) => setTimeout(r, 400));
+      await sleep(800);
+      // Phase B: repeated open/close cycles, like separate dictations.
+      for (let i = 1; i <= 6; i += 1) await capture(`cycle-${i}`, 2000);
+    } else if (!full) {
+      for (let i = 1; i <= 3; i += 1) await capture(`plain-${i}`, 1500);
+    } else {
+      await capture('plain-1', 3000);
+      await capture('plain-2', 3000);
+      // What a real dictation does on screen: overlay + start/stop cues.
+      await capture('with-overlay-and-cues', 3000, {
+        during: () => { ui.state({ state: 'listening' }); setTimeout(() => ui.sound('start'), 150); },
+        before: () => { ui.sound('stop'); ui.state({ state: 'idle' }); },
+      });
+      await capture('after-cues-1', 3000);
+      await capture('after-cues-2', 3000);
+      // Type into a scratch window of our own via System Events, like Type mode.
+      const scratch = new BrowserWindow({ width: 420, height: 160, title: 'GrokWhispers mic test', webPreferences: { sandbox: true, contextIsolation: true } });
+      await scratch.loadURL('data:text/html,<textarea id=t autofocus style="width:100%;height:120px"></textarea>');
+      app.focus({ steal: true });
+      scratch.focus();
+      await sleep(600);
+      let typed = 'skipped';
+      try {
+        await insertText('mic test typing', { clipboard, uiohook, method: 'type' });
+        typed = await scratch.webContents.executeJavaScript('document.getElementById("t").value');
+      } catch (err) { typed = `error: ${err.message}`; }
+      log('mic-test', 'typed into scratch window', { typed });
+      scratch.destroy();
+      await capture('after-typing-1', 3000);
+      await capture('after-typing-2', 3000);
     }
-    const ok = results.every((r) => r.chunks > 0 && r.peak > 0);
-    log('mic-test', ok ? 'pass' : 'fail', results);
+    // A dead capture delivers exact digital zeros; a quiet room still has a noise floor.
+    const live = (r) => r.chunks > 0 && r.zeroChunks < r.chunks / 2;
+    const ok = results.every(live);
+    const firstDead = results.find((r) => !live(r));
+    log('mic-test', ok ? 'pass' : 'fail', { firstDeadStep: firstDead?.step || null });
     console.log(JSON.stringify({ result: ok ? 'MIC TEST PASS' : 'MIC TEST FAIL', results }));
     app.exit(ok ? 0 : 1);
   } catch (err) {
+    log('mic-test', 'error', { error: err.message });
     console.log(JSON.stringify({ result: 'MIC TEST ERROR', error: err.message, results }));
     app.exit(2);
   }

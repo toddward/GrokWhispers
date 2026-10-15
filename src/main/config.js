@@ -18,6 +18,7 @@ const DEFAULTS = {
   pasteShortcut: 'auto', // 'auto' | 'ctrl+shift+v' | 'shift+insert'  (Linux only)
   restoreClipboard: true,
   sounds: true,
+  vmSoundsDefaulted: false, // set once sound cues were turned off for a VM
   liveCaptions: true,
   micDeviceId: '',
   maxSeconds: 360,
