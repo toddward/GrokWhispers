@@ -43,6 +43,7 @@ class DictationController extends EventEmitter {
   constructor(deps) {
     super();
     this.deps = deps;
+    this.log = deps.log || (() => {});
     this.state = 'idle'; // idle | listening | processing
     this.current = null;
   }
@@ -54,7 +55,10 @@ class DictationController extends EventEmitter {
   }
 
   async start({ handsFree = false } = {}) {
-    if (this.state !== 'idle') return false;
+    if (this.state !== 'idle') {
+      this.log('dictation', 'start ignored', { state: this.state });
+      return false;
+    }
     const { deps } = this;
     const settings = deps.getSettings();
     const apiKey = deps.getApiKey();
@@ -82,6 +86,7 @@ class DictationController extends EventEmitter {
     deps.frontmostApp().then((name) => { session.appName = name || ''; }).catch(() => {});
     session.engine.on('partial', (t) => { if (this.current === session) deps.ui.caption(t); });
     session.engine.on('failure', (err) => {
+      this.log('engine', 'failure', { error: err.message });
       session.failure = err;
       // Surface a dropped connection right away instead of letting the user keep talking.
       if (this.current === session && this.state === 'listening') this.stop();
@@ -94,6 +99,7 @@ class DictationController extends EventEmitter {
     try {
       await deps.recorder.start(settings.micDeviceId);
     } catch (err) {
+      this.log('dictation', 'mic start failed', { error: err.message });
       this._abort(session, `Microphone unavailable: ${err.message}`);
       return false;
     }
@@ -108,7 +114,11 @@ class DictationController extends EventEmitter {
       this.deps.ui.state({ state: 'listening', handsFree: session.handsFree });
       if (session.settings.sounds) this.deps.ui.sound('start');
     }
-    session.engine.connect();
+    const t0 = Date.now();
+    session.engine.connect().then(
+      () => this.log('engine', 'ready', { engine: session.settings.engine, ms: Date.now() - t0 }),
+      (err) => this.log('engine', 'connect failed', { error: err.message, ms: Date.now() - t0 }),
+    );
   }
 
   lock() {
@@ -159,7 +169,9 @@ class DictationController extends EventEmitter {
         this._setState('processing', { step: 'transcribing' });
       }
 
+      const tFinish = Date.now();
       const raw = await s.engine.finish();
+      this.log('engine', 'transcribed', { chars: raw.length, audioBytes: s.engine.audioBytes, ms: Date.now() - tFinish });
       if (s.cancelled) return null;
       if (!raw) {
         deps.ui.notify('No speech detected.', 'info');
@@ -183,8 +195,10 @@ class DictationController extends EventEmitter {
           text = choice.text;
           polishedUsed = choice.used;
           divergence = choice.score;
-        } catch {
+          this.log('engine', 'polished', { used: choice.used, divergence: Math.round(choice.score * 100) / 100 });
+        } catch (err) {
           polishedUsed = 'raw-fallback';
+          this.log('engine', 'polish failed', { error: err.message });
         }
       }
       s.engine.close();
@@ -216,6 +230,7 @@ class DictationController extends EventEmitter {
       this.emit('done', entry);
       return entry;
     } catch (err) {
+      this.log('dictation', 'stop failed', { error: err.message, cancelled: s.cancelled });
       if (!s.cancelled) {
         deps.ui.notify(friendlyError(err), 'error');
         if (s.settings.sounds) deps.ui.sound('error');

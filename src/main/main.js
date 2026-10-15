@@ -12,6 +12,8 @@ const { ChordMachine, ChordRecorder, describeChord } = require('./hotkey');
 const { insertText, frontmostAppName, which, isWayland, pickClipboard } = require('./inject');
 const { DictationController, createEngine } = require('./dictation');
 const { GrokVoiceSession } = require('../xai/realtime');
+const logger = require('./log');
+const { log } = logger;
 
 const IS_MAC = process.platform === 'darwin';
 const WAYLAND = process.platform === 'linux' && isWayland();
@@ -68,9 +70,15 @@ let recorderCrashes = [];
 function recorderCommand(type, extra = {}, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const id = ++cmdSeq;
-    const timer = setTimeout(() => { pendingReplies.delete(id); reject(new Error(`recorder ${type} timed out`)); }, timeoutMs);
+    const t0 = Date.now();
+    const timer = setTimeout(() => {
+      pendingReplies.delete(id);
+      log('recorder', `${type} timed out`, { id, ms: timeoutMs });
+      reject(new Error(`recorder ${type} timed out`));
+    }, timeoutMs);
     pendingReplies.set(id, (res) => {
       clearTimeout(timer);
+      if (type !== 'devices') log('recorder', `${type} ${res.ok ? 'ok' : 'failed'}`, { id, ms: Date.now() - t0, error: res.error });
       if (res.ok) resolve(res);
       else reject(new Error(res.error));
     });
@@ -190,6 +198,7 @@ const ui = {
   caption: (t) => { if (config.settings.liveCaptions) sendOverlay('overlay:caption', t); },
   sound: (name) => sendOverlay('overlay:sound', name),
   notify(message, kind = 'info') {
+    log('notice', kind, { message });
     showOverlay();
     sendOverlay('overlay:notice', { message, kind });
     const ms = kind === 'error' ? 6500 : 3000;
@@ -377,28 +386,39 @@ function setupHotkeys() {
   chord.on('lock', () => dictation.lock());
   chord.on('stop', () => dictation.stop());
   chord.on('cancel', () => dictation.cancel());
-  dictation.on('state', (st) => { if (st === 'idle') chord.reset(); });
+  for (const ev of ['start', 'lock', 'stop', 'cancel']) chord.on(ev, () => log('hotkey', ev, { pressed: [...chord.pressed].filter(isModifierName) }));
+  dictation.on('state', (st) => {
+    log('dictation', st);
+    if (st === 'idle') chord.reset();
+  });
 
   if (uiohook) {
     const names = keyNameMap();
     const { uIOhook } = uiohook;
-    uIOhook.on('keydown', (e) => {
-      const k = names.get(e.keycode) || `Key${e.keycode}`;
-      if (hotkeyRecorder) return hotkeyRecorder.rec.keydown(k);
-      chord.keydown(k);
-    });
-    uIOhook.on('keyup', (e) => {
+    const onKey = (down) => (e) => {
+      hookEvents += 1;
+      // Ignore the keystrokes we synthesize ourselves while inserting text.
+      if (injecting) { injectedEventsIgnored += 1; return; }
       const k = names.get(e.keycode) || `Key${e.keycode}`;
       if (hotkeyRecorder) {
+        if (down) return hotkeyRecorder.rec.keydown(k);
         const done = hotkeyRecorder.rec.keyup(k);
         if (done) hotkeyRecorder.done(done);
         return;
       }
-      chord.keyup(k);
-    });
+      if (isModifierName(k) || k === 'Escape') log('key', `${down ? 'down' : 'up'} ${k}`, { state: chord.state });
+      if (down) chord.keydown(k);
+      else chord.keyup(k);
+    };
+    uIOhook.on('keydown', onKey(true));
+    uIOhook.on('keyup', onKey(false));
+    uIOhook.on('mousemove', () => { hookEvents += 1; });
     try {
       uIOhook.start();
+      log('hook', 'started');
+      startHookWatchdog();
     } catch (err) {
+      log('hook', 'failed to start', { error: err.message, code: err.code });
       console.warn('[grokwhispers] could not start keyboard hook:', err.message);
       uiohook = null;
     }
@@ -416,6 +436,37 @@ function setupHotkeys() {
 
   // Keyups can be missed across sleep or the lock screen.
   for (const ev of ['resume', 'unlock-screen']) powerMonitor.on(ev, () => chord.clearPressed());
+}
+
+let hookEvents = 0;
+let injecting = false;
+let injectedEventsIgnored = 0;
+
+const isModifierName = (k) => /^(Ctrl|Alt|Shift|Meta)(Right)?$/.test(k);
+
+// macOS silently disables an event tap whose callback stalls, and the hook
+// library only re-enables it in some cases. If the cursor moves but the hook
+// has seen nothing at all, the tap is dead: restart it.
+function startHookWatchdog() {
+  let lastCount = hookEvents;
+  let lastPoint = screen.getCursorScreenPoint();
+  setInterval(() => {
+    const p = screen.getCursorScreenPoint();
+    const moved = p.x !== lastPoint.x || p.y !== lastPoint.y;
+    if (moved && hookEvents === lastCount && !injecting) {
+      log('hook', 'stalled: cursor moved but no hook events; restarting');
+      try {
+        uiohook.uIOhook.stop();
+        uiohook.uIOhook.start();
+        chord.clearPressed();
+        log('hook', 'restarted');
+      } catch (err) {
+        log('hook', 'restart failed', { error: err.message });
+      }
+    }
+    lastCount = hookEvents;
+    lastPoint = p;
+  }, 3000).unref?.();
 }
 
 // Tray, CLI and fallback-shortcut activation. If starting fails, un-arm the chord.
@@ -496,15 +547,32 @@ function rebuildTrayMenu() {
 
 // ---------- wiring ----------
 
-function insert(text) {
+async function insert(text) {
   const s = config.settings;
-  return insertText(text, {
-    clipboard,
-    uiohook,
-    method: s.insertMethod,
-    shortcut: s.pasteShortcut,
-    restore: s.restoreClipboard,
-  });
+  const t0 = Date.now();
+  injecting = true;
+  injectedEventsIgnored = 0;
+  try {
+    const res = await insertText(text, {
+      clipboard,
+      uiohook,
+      method: s.insertMethod,
+      shortcut: s.pasteShortcut,
+      restore: s.restoreClipboard,
+    });
+    log('insert', 'ok', { ...res, chars: text.length, ms: Date.now() - t0 });
+    return res;
+  } catch (err) {
+    log('insert', 'failed', { method: s.insertMethod, error: err.message, leftOnClipboard: Boolean(err.leftOnClipboard), ms: Date.now() - t0 });
+    throw err;
+  } finally {
+    // Let trailing synthetic key events drain, then forget any key state they left behind.
+    setTimeout(() => {
+      injecting = false;
+      log('insert', 'guard released', { ignoredEvents: injectedEventsIgnored });
+      chord?.clearPressed();
+    }, 150);
+  }
 }
 
 function handleArgs(argv) {
@@ -529,7 +597,18 @@ app.whenReady().then(async () => {
   if (!PRIMARY) return;
   if (IS_MAC) app.dock?.hide();
   const dir = app.getPath('userData');
+  logger.init(app.getPath('logs'));
   config = new Config(dir, { safeStorage });
+  log('app', 'start', {
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    platform: `${process.platform}-${process.arch}`,
+    packaged: app.isPackaged,
+    wayland: WAYLAND,
+    uiohookLoaded: Boolean(uiohook),
+    accessibility: IS_MAC ? systemPreferences.isTrustedAccessibilityClient(false) : null,
+    settings: (({ engine, insertMethod, pasteShortcut, hotkey, handsFreeOnTap, polish }) => ({ engine, insertMethod, pasteShortcut, hotkey, handsFreeOnTap, polish }))(config.settings),
+  });
   history = new History(dir, { limit: config.settings.historyLimit });
 
   createRecorderWindow();
@@ -545,6 +624,7 @@ app.whenReady().then(async () => {
     waitForKeysReleased,
     history,
     ui,
+    log,
   });
   dictation.on('needs-key', openSettings);
   dictation.on('done', () => rebuildTrayMenu());
