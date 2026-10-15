@@ -131,6 +131,9 @@ class DictationController extends EventEmitter {
   onAudio(chunk, level) {
     const s = this.current;
     if (!s || !s.acceptingAudio) return;
+    s.chunks = (s.chunks || 0) + 1;
+    s.peak = Math.max(s.peak || 0, level || 0);
+    s.levelSum = (s.levelSum || 0) + (level || 0);
     s.engine.sendAudio(chunk);
     if (this.state === 'listening') this.deps.ui.level(level);
   }
@@ -171,7 +174,13 @@ class DictationController extends EventEmitter {
 
       const tFinish = Date.now();
       const raw = await s.engine.finish();
-      this.log('engine', 'transcribed', { chars: raw.length, audioBytes: s.engine.audioBytes, ms: Date.now() - tFinish });
+      this.log('engine', 'transcribed', {
+        chars: raw.length,
+        audioBytes: s.engine.audioBytes,
+        ms: Date.now() - tFinish,
+        audio: audioStats(s),
+        server: s.engine.diagnostics,
+      });
       if (s.cancelled) return null;
       if (!raw) {
         deps.ui.notify('No speech detected.', 'info');
@@ -230,7 +239,7 @@ class DictationController extends EventEmitter {
       this.emit('done', entry);
       return entry;
     } catch (err) {
-      this.log('dictation', 'stop failed', { error: err.message, cancelled: s.cancelled });
+      this.log('dictation', 'stop failed', { error: err.message, cancelled: s.cancelled, audio: audioStats(s), server: s.engine.diagnostics });
       if (!s.cancelled) {
         deps.ui.notify(friendlyError(err), 'error');
         if (s.settings.sounds) deps.ui.sound('error');
@@ -272,6 +281,13 @@ class DictationController extends EventEmitter {
     if (session.settings.sounds) this.deps.ui.sound('error');
   }
 }
+
+// RMS level of the captured audio, to tell silence from a server problem.
+function audioStats(s) {
+  const chunks = s.chunks || 0;
+  return { chunks, peak: round3(s.peak || 0), mean: round3(chunks ? s.levelSum / chunks : 0) };
+}
+const round3 = (n) => Math.round(n * 1000) / 1000;
 
 function friendlyError(err) {
   const msg = err?.message || String(err);

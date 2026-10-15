@@ -45,6 +45,13 @@ class GrokVoiceSession extends EventEmitter {
     this.retriedWithoutCaptionModel = false;
     this.connectedAt = 0;
     this.closedAt = 0;
+    // User transcripts by conversation item, in arrival order. The server may
+    // deliver them via `.completed`, `conversation.item.added`, or only as live
+    // `.updated` captions, and may finish a segment before we commit.
+    this.userItems = new Map();
+    this.committedItemId = null;
+    this.eventCounts = {};
+    this.lastError = null;
   }
 
   connect() {
@@ -112,13 +119,48 @@ class GrokVoiceSession extends EventEmitter {
     };
   }
 
+  _userItem(id) {
+    const key = id || '_';
+    if (!this.userItems.has(key)) this.userItems.set(key, { transcript: '', done: false });
+    return this.userItems.get(key);
+  }
+
+  // Everything heard so far, completed segments first-to-last.
+  get heardText() {
+    return [...this.userItems.values()].map((i) => i.transcript.trim()).filter(Boolean).join(' ');
+  }
+
   _onEvent(ev) {
+    this.eventCounts[ev.type] = (this.eventCounts[ev.type] || 0) + 1;
     switch (ev.type) {
       case 'session.created':
         this._send(this.sessionConfig());
         break;
-      case 'conversation.item.input_audio_transcription.updated':
-        this.emit('partial', ev.transcript || '');
+      case 'conversation.item.input_audio_transcription.updated': {
+        const item = this._userItem(ev.item_id);
+        if (!item.done) item.transcript = ev.transcript || '';
+        this.emit('partial', this.heardText);
+        break;
+      }
+      case 'conversation.item.input_audio_transcription.completed': {
+        const item = this._userItem(ev.item_id);
+        item.transcript = ev.transcript || '';
+        item.done = true;
+        break;
+      }
+      case 'conversation.item.added': {
+        const it = ev.item;
+        if (it && it.role === 'user') {
+          const t = (it.content || []).map((c) => c.transcript || c.text || '').join(' ').trim();
+          const item = this._userItem(it.id);
+          if (t && !item.done) item.transcript = t;
+          if (t && it.status === 'completed') item.done = true;
+        }
+        break;
+      }
+      case 'input_audio_buffer.committed':
+        this.committedItemId = ev.item_id || this.committedItemId;
+        if (ev.item_id) this._userItem(ev.item_id);
         break;
       case 'response.output_text.delta':
       case 'response.text.delta':
@@ -141,12 +183,14 @@ class GrokVoiceSession extends EventEmitter {
           this._fail(serverError(ev));
           return;
         }
+        this.lastError = ev.error || ev;
         this.emit('serverError', ev.error || ev);
         break;
       default:
         break;
     }
     this.waiters.dispatch(ev);
+    this.emit('event', ev);
   }
 
   sendAudio(chunk) {
@@ -172,17 +216,51 @@ class GrokVoiceSession extends EventEmitter {
   }
 
   // Commit the held audio and return the raw transcript.
-  async finish() {
+  async finish({ graceMs } = {}) {
+    // Longer dictations take longer to transcribe; scale the wait with audio length.
+    const grace = graceMs ?? 3000 + (this.audioBytes / BYTES_PER_SECOND) * 100;
     await this.connect();
     if (this.closed) throw this.failure || new Error('Session closed');
     if (this.bytesSent < MIN_AUDIO_BYTES) return '';
-    const done = this.waiters.waitFor(
-      (ev) => ev.type === 'conversation.item.input_audio_transcription.completed',
-      { timeoutMs: this.timeoutMs, rejectOnError: true, label: 'transcription' },
-    );
-    this._send({ type: 'input_audio_buffer.commit' });
-    const ev = await done;
-    return (ev.transcript || '').trim();
+
+    const committedDone = () => this.committedItemId && this.userItems.get(this.committedItemId)?.done;
+    // Resolve when the committed item's transcript is final. Once the commit is
+    // acknowledged (or rejected), allow a short grace period, then return
+    // whatever we have heard rather than hanging.
+    await new Promise((resolve, reject) => {
+      let graceTimer = null;
+      let hardStop = null;
+      const cleanup = () => {
+        clearTimeout(graceTimer);
+        clearTimeout(hardStop);
+        this.off('event', onEvent);
+        this.off('failure', onFailure);
+      };
+      const done = () => { cleanup(); resolve(); };
+      const onEvent = (ev) => {
+        if (committedDone()) return done();
+        if (!graceTimer && (ev.type === 'input_audio_buffer.committed' || ev.type === 'error')) graceTimer = setTimeout(done, grace);
+      };
+      const onFailure = (err) => { cleanup(); reject(err); };
+      hardStop = setTimeout(done, grace * 2 + 2000); // commit never acknowledged
+      this.on('event', onEvent);
+      this.on('failure', onFailure);
+      this._send({ type: 'input_audio_buffer.commit' });
+    });
+
+    const text = this.heardText;
+    if (!text && this.lastError) throw new Error(`xAI error: ${this.lastError.message || this.lastError.code || 'transcription failed'}`);
+    return text;
+  }
+
+  // Diagnostic summary of what the server sent (types and counts only).
+  get diagnostics() {
+    return {
+      events: this.eventCounts,
+      committedItem: Boolean(this.committedItemId),
+      items: [...this.userItems.values()].map((i) => ({ chars: i.transcript.length, done: i.done })),
+      lastError: this.lastError ? (this.lastError.message || this.lastError.code) : null,
+    };
   }
 
   // Ask Grok Voice to turn the committed utterance into polished written text.

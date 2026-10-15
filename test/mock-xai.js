@@ -43,11 +43,18 @@ function realtimeSession(ws, opts, log) {
   const send = (o) => ws.send(JSON.stringify(o));
   let audioBytes = 0;
   let configured = false;
+  let segmentSent = false;
   send({ type: 'session.created', session: { id: 'sess_1' } });
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
       audioBytes += data.length;
       log.push({ type: '<binary>', bytes: data.length, beforeConfigured: !configured });
+      // Server-side segmentation: a segment finishes while the user is still talking.
+      if (opts.mode === 'earlySegment' && audioBytes >= 9600 && !segmentSent) {
+        segmentSent = true;
+        send({ type: 'conversation.item.input_audio_transcription.updated', item_id: 'seg_1', transcript: 'first part' });
+        send({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'seg_1', transcript: 'first part of the sentence' });
+      }
       return;
     }
     const ev = JSON.parse(data.toString());
@@ -70,7 +77,20 @@ function realtimeSession(ws, opts, log) {
         send({ type: 'session.updated', session: ev.session });
         break;
       case 'input_audio_buffer.commit':
+        if (opts.mode === 'commitError' || opts.mode === 'earlyThenError') {
+          send({ type: 'error', error: { type: 'invalid_request_error', message: 'Input audio buffer is empty' } });
+          return;
+        }
         send({ type: 'input_audio_buffer.committed', item_id: 'msg_1' });
+        if (opts.mode === 'itemAdded') {
+          send({ type: 'conversation.item.added', item: { id: 'msg_1', type: 'message', role: 'user', status: 'completed', content: [{ type: 'input_audio', transcript: 'delivered via item added' }] } });
+          return;
+        }
+        if (opts.mode === 'captionsOnly') {
+          send({ type: 'conversation.item.input_audio_transcription.updated', item_id: 'msg_1', transcript: 'only live captions arrived' });
+          return;
+        }
+        if (opts.mode === 'earlySegment') return; // nothing left in the buffer
         if (ev && ws.readyState === 1) {
           send({ type: 'conversation.item.input_audio_transcription.updated', item_id: 'msg_1', transcript: 'um so' });
           setTimeout(() => send({

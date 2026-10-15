@@ -158,6 +158,10 @@ class GrokSttSession extends EventEmitter {
     try { this.ws?.close(1000); } catch { /* ignore */ }
   }
 
+  get diagnostics() {
+    return { finals: this.finals.length, interimChars: this.interim.length };
+  }
+
   get billedSeconds() {
     // Streaming STT is billed on audio duration, not connection time.
     return this.bytesSent / BYTES_PER_SECOND;

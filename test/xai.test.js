@@ -74,6 +74,42 @@ test('Grok Voice: refuses a session that stays in server VAD mode', async (t) =>
   await assert.rejects(s.connect(), /manual turns are required/);
 });
 
+for (const [mode, expected] of [
+  ['itemAdded', 'delivered via item added'],
+  ['captionsOnly', 'only live captions arrived'],
+  ['earlySegment', 'first part of the sentence'],
+  ['commitError', 'first part of the sentence'],
+]) {
+  test(`Grok Voice: transcript recovered when server uses ${mode}`, async (t) => {
+    const mock = await startMock({ realtime: { mode: mode === 'commitError' ? 'earlyThenError' : mode } });
+    t.after(() => mock.close());
+    const s = new GrokVoiceSession({ apiKey: 'test-key', url: mock.realtimeUrl, timeoutMs: 5000 });
+    await s.connect();
+    if (mode === 'commitError') {
+      // a segment completed during speech, then the commit is rejected as empty
+      s._onEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'seg_1', transcript: 'first part of the sentence' });
+    }
+    s.sendAudio(pcm(500));
+    const t0 = Date.now();
+    const text = await s.finish({ graceMs: 200 });
+    assert.equal(text, expected);
+    assert.ok(Date.now() - t0 < 2000, 'no long hang');
+    s.close();
+  });
+}
+
+test('Grok Voice: total silence after commit resolves empty instead of hanging 20 s', async (t) => {
+  const mock = await startMock({ realtime: { mode: 'earlySegment', transcript: '' } });
+  t.after(() => mock.close());
+  const s = new GrokVoiceSession({ apiKey: 'test-key', url: mock.realtimeUrl, timeoutMs: 20000 });
+  await s.connect();
+  s.sendAudio(pcm(150)); // below the segment threshold: server sends nothing
+  const t0 = Date.now();
+  assert.equal(await s.finish({ graceMs: 200 }), '');
+  assert.ok(Date.now() - t0 < 2000);
+  s.close();
+});
+
 test('Grok Voice: too little audio returns empty without committing', async (t) => {
   const mock = await startMock();
   t.after(() => mock.close());
