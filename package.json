@@ -1,0 +1,31 @@
+{
+  "name": "grokwhispers",
+  "productName": "GrokWhispers",
+  "version": "0.1.0",
+  "description": "Hold-to-talk voice typing for macOS and Linux, powered by xAI Grok Voice 3.0. Bring your own API key \u2014 no subscription.",
+  "homepage": "https://github.com/toddward/GrokWhispers",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/toddward/GrokWhispers.git"
+  },
+  "main": "src/main/main.js",
+  "license": "MIT",
+  "author": "GrokWhispers contributors",
+  "scripts": {
+    "postinstall": "node -e \"try{require.resolve('electron/install.js')}catch{process.exit(0)}require('electron/install.js')\"",
+    "start": "electron .",
+    "test": "node --test test/",
+    "smoke": "electron . --smoke-test",
+    "icons": "node scripts/make-icons.js",
+    "dist:mac": "electron-builder --mac --config electron-builder.config.js",
+    "dist:linux": "electron-builder --linux --config electron-builder.config.js"
+  },
+  "dependencies": {
+    "uiohook-napi": "1.5.5",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3"
+  }
+}

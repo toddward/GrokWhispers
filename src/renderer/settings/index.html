@@ -1,0 +1,128 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'" />
+    <title>GrokWhispers Settings</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <header>
+      <h1>GrokWhispers</h1>
+      <nav>
+        <button class="tab active" data-tab="general">General</button>
+        <button class="tab" data-tab="dictionary">Dictionary</button>
+        <button class="tab" data-tab="history">History</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="tab-general" class="panel">
+        <div class="card">
+          <h2>xAI API key</h2>
+          <p class="hint">GrokWhispers has no subscription. You pay xAI directly for what you use. Get a key at <code>console.x.ai</code>.</p>
+          <div class="row">
+            <input id="apiKey" type="password" placeholder="xai-…" autocomplete="off" spellcheck="false" />
+            <button id="saveKey">Save</button>
+            <button id="testKey" class="secondary">Test</button>
+          </div>
+          <p id="keyStatus" class="hint"></p>
+        </div>
+
+        <div class="card">
+          <h2>Dictation</h2>
+          <label class="field">
+            <span>Hotkey</span>
+            <span class="row">
+              <kbd id="hotkey"></kbd>
+              <button id="recordHotkey" class="secondary">Change…</button>
+            </span>
+          </label>
+          <p class="hint">Hold to talk and release to insert. Tap quickly for hands-free mode, then tap again to finish. Press Esc to cancel.</p>
+          <label class="field">
+            <span>Engine</span>
+            <select id="engine">
+              <option value="grok-voice-3">Grok Voice 3.0: transcribe + polish (~$0.08/min)</option>
+              <option value="grok-stt">Grok Speech-to-Text: transcribe only (~$0.20/hour)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Polish with Grok</span>
+            <input id="polish" type="checkbox" />
+          </label>
+          <label class="field">
+            <span>Style</span>
+            <select id="style">
+              <option value="auto">Auto (match the app)</option>
+              <option value="casual">Casual</option>
+              <option value="formal">Formal</option>
+              <option value="verbatim">Verbatim</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Language</span>
+            <input id="language" type="text" placeholder="en" maxlength="8" />
+          </label>
+          <label class="field">
+            <span>Microphone</span>
+            <select id="micDeviceId"><option value="">System default</option></select>
+          </label>
+          <label class="field"><span>Live captions</span><input id="liveCaptions" type="checkbox" /></label>
+          <label class="field"><span>Sounds</span><input id="sounds" type="checkbox" /></label>
+          <label class="field"><span>Tap for hands-free</span><input id="handsFreeOnTap" type="checkbox" /></label>
+        </div>
+
+        <div class="card">
+          <h2>Text insertion</h2>
+          <label class="field">
+            <span>Method</span>
+            <select id="insertMethod">
+              <option value="paste">Paste via clipboard (fast)</option>
+              <option value="type">Type keystrokes (slower, keeps clipboard)</option>
+            </select>
+          </label>
+          <label class="field linux-only">
+            <span>Paste shortcut</span>
+            <select id="pasteShortcut">
+              <option value="auto">Ctrl+V</option>
+              <option value="ctrl+shift+v">Ctrl+Shift+V (terminals)</option>
+              <option value="shift+insert">Shift+Insert</option>
+            </select>
+          </label>
+          <label class="field"><span>Restore clipboard after paste</span><input id="restoreClipboard" type="checkbox" /></label>
+        </div>
+
+        <div class="card" id="permCard">
+          <h2>System</h2>
+          <ul id="perms"></ul>
+        </div>
+      </section>
+
+      <section id="tab-dictionary" class="panel hidden">
+        <div class="card">
+          <h2>Custom vocabulary</h2>
+          <p class="hint">Names, jargon and product terms, one per line (up to 100). They're sent to Grok as key terms to bias recognition.</p>
+          <textarea id="dictionary" rows="14" spellcheck="false"></textarea>
+          <div class="row end"><button id="saveDictionary">Save</button></div>
+        </div>
+      </section>
+
+      <section id="tab-history" class="panel hidden">
+        <div class="card">
+          <div class="row spread">
+            <h2>Usage (estimated)</h2>
+            <button id="clearHistory" class="secondary">Clear history</button>
+          </div>
+          <p id="usage" class="hint"></p>
+        </div>
+        <ul id="historyList"></ul>
+      </section>
+    </main>
+
+    <dialog id="hotkeyDialog">
+      <p>Press and release the keys you want to use…</p>
+    </dialog>
+
+    <script src="settings.js"></script>
+  </body>
+</html>
