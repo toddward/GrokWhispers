@@ -18,6 +18,7 @@ const { log } = logger;
 const IS_MAC = process.platform === 'darwin';
 const WAYLAND = process.platform === 'linux' && isWayland();
 const SMOKE = process.argv.includes('--smoke-test');
+const MIC_TEST = process.argv.includes('--mic-test');
 const ROOT = path.join(__dirname, '..', '..');
 const asset = (...p) => path.join(ROOT, 'assets', ...p);
 const renderer = (...p) => path.join(ROOT, 'src', 'renderer', ...p);
@@ -36,7 +37,7 @@ if (WAYLAND && !NATIVE_WAYLAND && !process.argv.some((a) => a.startsWith('--ozon
 }
 
 // A second launch forwards its CLI verb (--toggle etc.) to the running instance and exits.
-const PRIMARY = SMOKE || app.requestSingleInstanceLock();
+const PRIMARY = SMOKE || MIC_TEST || app.requestSingleInstanceLock();
 if (!PRIMARY) app.quit();
 
 let uiohook = null;
@@ -118,6 +119,7 @@ function createRecorderWindow() {
 const fromRecorder = (e) => recorderWin && !recorderWin.isDestroyed() && e.sender === recorderWin.webContents;
 
 ipcMain.on('recorder:ready', (e) => { if (fromRecorder(e)) markRecorderReady(); });
+ipcMain.on('recorder:log', (e, msg, data) => { if (fromRecorder(e)) log('mic', String(msg).slice(0, 200), data); });
 
 ipcMain.on('recorder:reply', (e, id, res) => {
   if (!fromRecorder(e)) return;
@@ -125,8 +127,12 @@ ipcMain.on('recorder:reply', (e, id, res) => {
   if (cb) { pendingReplies.delete(id); cb(res); }
 });
 
+let micTestSink = null;
+
 ipcMain.on('recorder:chunk', (e, pcm, level, gen) => {
-  if (!dictation || !fromRecorder(e) || gen !== recorderGen) return;
+  if (!fromRecorder(e) || gen !== recorderGen) return;
+  if (micTestSink) return micTestSink(level);
+  if (!dictation) return;
   dictation.onAudio(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), level);
 });
 
@@ -630,6 +636,7 @@ app.whenReady().then(async () => {
   dictation.on('done', () => rebuildTrayMenu());
 
   if (SMOKE) return runSmokeTest();
+  if (MIC_TEST) return runMicTest();
 
   if (IS_MAC) {
     if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
@@ -650,6 +657,36 @@ app.on('will-quit', () => {
   try { uiohook?.uIOhook.stop(); } catch { /* ignore */ }
   globalShortcut.unregisterAll();
 });
+
+// Opens and closes the mic several times in a row, like consecutive dictations,
+// and reports levels. Exact zeros mean the capture delivered digital silence.
+async function runMicTest() {
+  if (IS_MAC && systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
+    await systemPreferences.askForMediaAccess('microphone');
+  }
+  const results = [];
+  try {
+    await recorderReady;
+    for (let i = 1; i <= 3; i += 1) {
+      const levels = [];
+      micTestSink = (l) => levels.push(l);
+      await recorder.start(config.settings.micDeviceId);
+      await new Promise((r) => setTimeout(r, 1500));
+      await recorder.stop();
+      micTestSink = null;
+      const peak = Math.max(0, ...levels);
+      results.push({ capture: i, chunks: levels.length, peak: Math.round(peak * 10000) / 10000, zeroChunks: levels.filter((l) => l === 0).length });
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    const ok = results.every((r) => r.chunks > 0 && r.peak > 0);
+    log('mic-test', ok ? 'pass' : 'fail', results);
+    console.log(JSON.stringify({ result: ok ? 'MIC TEST PASS' : 'MIC TEST FAIL', results }));
+    app.exit(ok ? 0 : 1);
+  } catch (err) {
+    console.log(JSON.stringify({ result: 'MIC TEST ERROR', error: err.message, results }));
+    app.exit(2);
+  }
+}
 
 // Launch every window, confirm the renderers load, then exit. Used by `npm run smoke`.
 async function runSmokeTest() {
