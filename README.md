@@ -23,7 +23,7 @@ Hold a hotkey, speak, let go, and your words appear as clean text in whatever ap
                     ▼
             divergence guard: if Grok answered instead of formatting, use the raw transcript
                     ▼
-            clipboard snapshot → write text → ⌘V / Ctrl+V → restore clipboard (500 ms)
+            clipboard snapshot → write text → ⌘V / Ctrl+V → restore clipboard (800 ms)
 ```
 
 | Engine | What it does | xAI list price |

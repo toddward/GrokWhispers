@@ -2,7 +2,7 @@
 
 // Inserts text into whatever app has focus via the clipboard:
 // snapshot clipboard -> write text -> synthesize paste ->
-// restore the clipboard ~500 ms later (only if nothing else changed it).
+// restore the clipboard ~800 ms later (only if nothing else changed it).
 
 const fs = require('node:fs');
 const path = require('node:path');
